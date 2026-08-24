@@ -41,8 +41,12 @@ final class SafeHttpFetcherTest extends TestCase
             'response_headers' => ['Content-Type' => 'text/html'],
         ]);
         $httpClient = new MockHttpClient($mockResponse);
-        $guard = $this->createMock(UrlGuard::class);
-        $guard->method('assertSafe')->willReturn('93.184.216.34');
+        $guard = new readonly class extends UrlGuard {
+            public function assertSafe(string $url): string
+            {
+                return '93.184.216.34';
+            }
+        };
 
         $fetcher = new SafeHttpFetcher($httpClient, $guard);
         $result = $fetcher->fetch('https://example.com');

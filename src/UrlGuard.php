@@ -6,7 +6,7 @@ namespace Bahdan\SafeHttpClient;
 
 use Bahdan\SafeHttpClient\Exception\UnsafeUrlException;
 
-final readonly class UrlGuard
+readonly class UrlGuard
 {
     public function normalize(string $input): string
     {
