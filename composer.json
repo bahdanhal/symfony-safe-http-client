@@ -10,6 +10,7 @@
         }
     ],
     "require": {
+        "amphp/dns": "^2.0",
         "php": ">=8.3",
         "symfony/http-client": "^7.0 || ^8.0"
     },

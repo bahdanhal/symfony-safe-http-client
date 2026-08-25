@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Bahdan\SafeHttpClient\Tests;
 
+use Bahdan\SafeHttpClient\DnsResolverInterface;
 use Bahdan\SafeHttpClient\SafeHttpFetcher;
 use Bahdan\SafeHttpClient\UrlGuard;
 use PHPUnit\Framework\TestCase;
@@ -31,6 +32,16 @@ final class SafeHttpFetcherTest extends TestCase
         self::assertSame(
             'https://other.org/page',
             $fetcher->resolveUrl('https://example.com/base', 'https://other.org/page')
+        );
+
+        self::assertSame(
+            'https://example.com/dir/sub/',
+            $fetcher->resolveUrl('https://example.com/dir/', 'sub/')
+        );
+
+        self::assertSame(
+            'https://example.com/dir/?page=2#results',
+            $fetcher->resolveUrl('https://example.com/dir/item', './?page=2#results')
         );
     }
 
@@ -67,12 +78,18 @@ final class SafeHttpFetcherTest extends TestCase
             'response_headers' => ['Content-Type' => 'text/html'],
         ]);
         $httpClient = new MockHttpClient([$mockResponse1, $mockResponse2]);
-        $guard = new readonly class extends UrlGuard {
-            public function assertSafe(string $url): string
+        $resolver = new class implements DnsResolverInterface {
+            /** @var list<list<string>> */
+            public array $batches = [];
+
+            public function resolveMany(array $hosts): array
             {
-                return '93.184.216.34';
+                $this->batches[] = $hosts;
+
+                return array_fill_keys($hosts, ['93.184.216.34']);
             }
         };
+        $guard = new UrlGuard($resolver);
 
         $fetcher = new SafeHttpFetcher($httpClient, $guard);
         $results = $fetcher->fetchMany(['https://example.com/p1', 'https://example.com/p2']);
@@ -82,6 +99,33 @@ final class SafeHttpFetcherTest extends TestCase
         self::assertSame('<html>Page 1</html>', $results['https://example.com/p1']['body']);
         self::assertSame(200, $results['https://example.com/p2']['status']);
         self::assertSame('<html>Page 2</html>', $results['https://example.com/p2']['body']);
+        self::assertCount(1, $resolver->batches);
+        self::assertSame(['example.com'], $resolver->batches[0]);
+    }
+
+    public function testFetchRejectsCredentialBearingRedirectBeforeSecondRequest(): void
+    {
+        $requestCount = 0;
+        $httpClient = new MockHttpClient(static function () use (&$requestCount): MockResponse {
+            ++$requestCount;
+
+            return new MockResponse('', [
+                'http_code' => 302,
+                'response_headers' => ['Location' => 'https://user:secret@example.com/private'],
+            ]);
+        });
+        $guard = new UrlGuard(new class implements DnsResolverInterface {
+            public function resolveMany(array $hosts): array
+            {
+                return array_fill_keys($hosts, ['93.184.216.34']);
+            }
+        });
+
+        $result = (new SafeHttpFetcher($httpClient, $guard))->fetch('https://example.com');
+
+        self::assertSame(1, $requestCount);
+        self::assertSame(0, $result['status']);
+        self::assertSame('URLs containing credentials are not allowed.', $result['error']);
     }
 
     public function testEnforcesMaxBodyBytesLimit(): void

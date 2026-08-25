@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Bahdan\SafeHttpClient\Tests;
 
 use Bahdan\SafeHttpClient\Exception\UnsafeUrlException;
+use Bahdan\SafeHttpClient\DnsResolverInterface;
 use Bahdan\SafeHttpClient\UrlGuard;
 use PHPUnit\Framework\TestCase;
 
@@ -14,7 +15,12 @@ final class UrlGuardTest extends TestCase
 
     protected function setUp(): void
     {
-        $this->urlGuard = new UrlGuard();
+        $this->urlGuard = new UrlGuard(new class implements DnsResolverInterface {
+            public function resolveMany(array $hosts): array
+            {
+                return array_fill_keys($hosts, ['93.184.216.34']);
+            }
+        });
     }
 
     public function testNormalizeValidUrl(): void
@@ -51,6 +57,13 @@ final class UrlGuardTest extends TestCase
         $this->urlGuard->normalize('http://user:pass@example.com');
     }
 
+    public function testRedirectValidationRejectsCredentials(): void
+    {
+        $this->expectException(UnsafeUrlException::class);
+        $this->expectExceptionMessage('URLs containing credentials are not allowed.');
+        $this->urlGuard->assertSafe('https://user:secret@example.com/private');
+    }
+
     /**
      * @param string $ip
      */
@@ -81,6 +94,7 @@ final class UrlGuardTest extends TestCase
         yield 'ipv6 unspecified ::' => ['::'];
         yield 'ipv6 link local fe80::1' => ['fe80::1'];
         yield 'ipv6 unique local fc00::1' => ['fc00::1'];
+        yield 'aws imdsv6' => ['fd00:ec2::254'];
         yield 'ipv4 mapped loopback' => ['::ffff:127.0.0.1'];
         yield 'ipv4 mapped imds' => ['::ffff:169.254.169.254'];
     }

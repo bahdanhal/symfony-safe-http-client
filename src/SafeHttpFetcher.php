@@ -129,12 +129,29 @@ class SafeHttpFetcher
             /** @var array<int, string> $responseMap */
             $responseMap = [];
 
+            /** @var array<string, string> $pendingUrls */
+            $pendingUrls = [];
+            foreach ($states as $key => $state) {
+                if (!$state->done) {
+                    $pendingUrls[$key] = $state->currentUrl;
+                }
+            }
+            if ($pendingUrls === []) {
+                break;
+            }
+
+            try {
+                $resolvedIps = $this->urlGuard->assertSafeMany(array_values($pendingUrls));
+            } catch (\Throwable) {
+                $resolvedIps = [];
+            }
+
             foreach ($states as $key => $state) {
                 if ($state->done) {
                     continue;
                 }
                 try {
-                    $resolvedIp = $this->urlGuard->assertSafe($state->currentUrl);
+                    $resolvedIp = $resolvedIps[$state->currentUrl] ?? $this->urlGuard->assertSafe($state->currentUrl);
                     $response = $this->httpClient->request('GET', $state->currentUrl, $this->options($state->currentUrl, $resolvedIp));
                     $responses[$key] = $response;
                     $responseMap[spl_object_id($response)] = $key;
@@ -289,8 +306,21 @@ class SafeHttpFetcher
 
         $directory = preg_replace('#/[^/]*$#', '/', $baseParts['path'] ?? '/');
         $path = $directory . $reference;
+        $referencePath = (string) parse_url($path, PHP_URL_PATH);
+        $suffix = '';
+        $query = parse_url($path, PHP_URL_QUERY);
+        if (is_string($query)) {
+            $suffix .= '?' . $query;
+        }
+        $fragment = parse_url($path, PHP_URL_FRAGMENT);
+        if (is_string($fragment)) {
+            $suffix .= '#' . $fragment;
+        }
+        $preserveTrailingSlash = str_ends_with($referencePath, '/')
+            || str_ends_with($referencePath, '/.')
+            || str_ends_with($referencePath, '/..');
         $segments = [];
-        foreach (explode('/', $path) as $segment) {
+        foreach (explode('/', $referencePath) as $segment) {
             if ($segment === '' || $segment === '.') {
                 continue;
             }
@@ -301,7 +331,12 @@ class SafeHttpFetcher
             }
         }
 
-        return $origin . '/' . implode('/', $segments);
+        $normalizedPath = '/' . implode('/', $segments);
+        if ($preserveTrailingSlash && $normalizedPath !== '/') {
+            $normalizedPath .= '/';
+        }
+
+        return $origin . $normalizedPath . $suffix;
     }
 
     private function duration(int $started): int

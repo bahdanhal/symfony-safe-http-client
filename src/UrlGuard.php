@@ -8,6 +8,13 @@ use Bahdan\SafeHttpClient\Exception\UnsafeUrlException;
 
 readonly class UrlGuard
 {
+    private DnsResolverInterface $dnsResolver;
+
+    public function __construct(?DnsResolverInterface $dnsResolver = null)
+    {
+        $this->dnsResolver = $dnsResolver ?? new AsyncDnsResolver();
+    }
+
     public function normalize(string $input): string
     {
         $input = trim($input);
@@ -46,6 +53,58 @@ readonly class UrlGuard
 
     public function assertSafe(string $url): string
     {
+        return $this->assertSafeMany([$url])[$url];
+    }
+
+    /**
+     * Resolves all hostnames concurrently and returns one pinned address per URL.
+     *
+     * @param list<string> $urls
+     * @return array<string, string>
+     */
+    public function assertSafeMany(array $urls): array
+    {
+        /** @var array<string, string> $hosts */
+        $hosts = [];
+        /** @var array<string, string> $resolved */
+        $resolved = [];
+
+        foreach ($urls as $url) {
+            $host = $this->validatedHost($url);
+            $rawHost = trim($host, '[]');
+            if (filter_var($rawHost, FILTER_VALIDATE_IP)) {
+                if ($this->isIpBlocked($rawHost)) {
+                    throw new UnsafeUrlException('Private, reserved, and local network targets are not allowed.');
+                }
+                $resolved[$url] = $rawHost;
+                continue;
+            }
+
+            if ($host === 'localhost' || str_ends_with($host, '.localhost') || !str_contains($host, '.')) {
+                throw new UnsafeUrlException('Local and internal hostnames are not allowed.');
+            }
+            $hosts[$url] = $host;
+        }
+
+        $recordsByHost = $this->dnsResolver->resolveMany(array_values(array_unique($hosts)));
+        foreach ($hosts as $url => $host) {
+            $records = $recordsByHost[$host] ?? [];
+            if ($records === []) {
+                throw new UnsafeUrlException('The hostname could not be resolved.');
+            }
+            foreach ($records as $ip) {
+                if ($this->isIpBlocked($ip)) {
+                    throw new UnsafeUrlException('Private, reserved, and local network targets are not allowed.');
+                }
+            }
+            $resolved[$url] = $records[0];
+        }
+
+        return $resolved;
+    }
+
+    private function validatedHost(string $url): string
+    {
         $parts = parse_url($url);
         if (!is_array($parts) || !isset($parts['scheme'], $parts['host'])) {
             throw new UnsafeUrlException('A redirect pointed to an invalid URL.');
@@ -55,7 +114,11 @@ readonly class UrlGuard
             throw new UnsafeUrlException('A redirect used an unsupported protocol.');
         }
 
-        return $this->assertPublicHost(strtolower(rtrim($parts['host'], '.')));
+        if (isset($parts['user']) || isset($parts['pass'])) {
+            throw new UnsafeUrlException('URLs containing credentials are not allowed.');
+        }
+
+        return strtolower(rtrim($parts['host'], '.'));
     }
 
     /**
@@ -106,19 +169,18 @@ readonly class UrlGuard
             throw new UnsafeUrlException('Local and internal hostnames are not allowed.');
         }
 
-        $records = dns_get_record($host, DNS_A | DNS_AAAA);
-        if ($records === false || $records === []) {
+        $records = $this->dnsResolver->resolveMany([$host])[$host] ?? [];
+        if ($records === []) {
             throw new UnsafeUrlException('The hostname could not be resolved.');
         }
 
-        foreach ($records as $record) {
-            $ip = $record['ip'] ?? $record['ipv6'] ?? null;
-            if ($ip === null || $this->isIpBlocked($ip)) {
+        foreach ($records as $ip) {
+            if ($this->isIpBlocked($ip)) {
                 throw new UnsafeUrlException('Private, reserved, and local network targets are not allowed.');
             }
         }
 
-        return $records[0]['ip'] ?? $records[0]['ipv6'];
+        return $records[0];
     }
 
     public function isIpBlocked(string $ip): bool
