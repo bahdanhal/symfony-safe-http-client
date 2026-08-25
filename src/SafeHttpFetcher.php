@@ -50,10 +50,25 @@ class SafeHttpFetcher
                 if ($status >= 300 && $status < 400 && is_string($location)) {
                     $redirects[] = ['url' => $url, 'status' => $status, 'location' => $location];
                     $url = $this->resolveUrl($url, $location);
+                    $response->cancel();
                     continue;
                 }
 
-                $body = $response->getContent(false);
+                $bodyBuffer = '';
+                $bodySize = 0;
+                foreach ($this->httpClient->stream($response, $this->timeoutSeconds) as $chunk) {
+                    if ($chunk->isTimeout()) {
+                        throw new \RuntimeException('Request timed out.');
+                    }
+                    $chunkContent = $chunk->getContent();
+                    $bodySize += strlen($chunkContent);
+                    if ($bodySize > $this->maxBodyBytes) {
+                        $response->cancel();
+                        throw new \RuntimeException('Response body exceeded the configured size limit.');
+                    }
+                    $bodyBuffer .= $chunkContent;
+                }
+
                 $contentType = strtolower($headers['content-type'][0] ?? '');
 
                 return [
@@ -61,7 +76,7 @@ class SafeHttpFetcher
                     'final_url' => $url,
                     'status' => $status,
                     'headers' => $headers,
-                    'body' => $body,
+                    'body' => $bodyBuffer,
                     'content_type' => $contentType,
                     'duration_ms' => $this->duration($started),
                     'redirects' => $redirects,
@@ -109,14 +124,20 @@ class SafeHttpFetcher
         }
 
         for ($hop = 0; $hop <= $maxRedirects; ++$hop) {
+            /** @var array<string, \Symfony\Contracts\HttpClient\ResponseInterface> $responses */
             $responses = [];
+            /** @var array<int, string> $responseMap */
+            $responseMap = [];
+
             foreach ($states as $key => $state) {
                 if ($state->done) {
                     continue;
                 }
                 try {
                     $resolvedIp = $this->urlGuard->assertSafe($state->currentUrl);
-                    $responses[$key] = $this->httpClient->request('GET', $state->currentUrl, $this->options($state->currentUrl, $resolvedIp));
+                    $response = $this->httpClient->request('GET', $state->currentUrl, $this->options($state->currentUrl, $resolvedIp));
+                    $responses[$key] = $response;
+                    $responseMap[spl_object_id($response)] = $key;
                 } catch (\Throwable $exception) {
                     $state->result = $this->errorResult($state->requestedUrl, $state->currentUrl, $state->started, $state->redirects, $exception->getMessage());
                     $state->done = true;
@@ -127,44 +148,105 @@ class SafeHttpFetcher
                 break;
             }
 
-            foreach ($responses as $key => $response) {
-                $state = $states[$key];
-                try {
-                    $status = $response->getStatusCode();
-                    /** @var array<string, list<string>> $headers */
-                    $headers = $response->getHeaders(false);
-                    $location = $headers['location'][0] ?? null;
-                    if ($status >= 300 && $status < 400 && is_string($location)) {
-                        $state->redirects[] = [
-                            'url' => $state->currentUrl,
-                            'status' => $status,
-                            'location' => $location,
-                        ];
-                        $state->currentUrl = $this->resolveUrl($state->currentUrl, $location);
+            /** @var array<string, string> $buffers */
+            $buffers = [];
+            /** @var array<string, int> $bufferSizes */
+            $bufferSizes = [];
+            /** @var array<string, int> $statuses */
+            $statuses = [];
+            /** @var array<string, array<string, list<string>>> $headersMap */
+            $headersMap = [];
+            /** @var array<string, bool> $isRedirect */
+            $isRedirect = [];
+
+            try {
+                foreach ($this->httpClient->stream($responses, $this->timeoutSeconds) as $response => $chunk) {
+                    $objId = spl_object_id($response);
+                    $key = $responseMap[$objId] ?? null;
+                    if ($key === null) {
                         continue;
                     }
+                    $state = $states[$key];
 
-                    $state->result = [
-                        'requested_url' => $state->requestedUrl,
-                        'final_url' => $state->currentUrl,
-                        'status' => $status,
-                        'headers' => $headers,
-                        'body' => $response->getContent(false),
-                        'content_type' => strtolower($headers['content-type'][0] ?? ''),
-                        'duration_ms' => $this->duration($state->started),
-                        'redirects' => $state->redirects,
-                        'error' => null,
-                    ];
-                    $state->done = true;
-                } catch (\Throwable $exception) {
-                    $state->result = $this->errorResult(
-                        $state->requestedUrl,
-                        $state->currentUrl,
-                        $state->started,
-                        $state->redirects,
-                        $exception->getMessage()
-                    );
-                    $state->done = true;
+                    try {
+                        if ($chunk->isTimeout()) {
+                            $state->result = $this->errorResult($state->requestedUrl, $state->currentUrl, $state->started, $state->redirects, 'Request timed out.');
+                            $state->done = true;
+                            $response->cancel();
+                            continue;
+                        }
+
+                        if ($chunk->isFirst()) {
+                            $status = $response->getStatusCode();
+                            /** @var array<string, list<string>> $headers */
+                            $headers = $response->getHeaders(false);
+                            $statuses[$key] = $status;
+                            $headersMap[$key] = $headers;
+                            $location = $headers['location'][0] ?? null;
+
+                            if ($status >= 300 && $status < 400 && is_string($location)) {
+                                $state->redirects[] = [
+                                    'url' => $state->currentUrl,
+                                    'status' => $status,
+                                    'location' => $location,
+                                ];
+                                $state->currentUrl = $this->resolveUrl($state->currentUrl, $location);
+                                $isRedirect[$key] = true;
+                                $response->cancel();
+                                continue;
+                            }
+                            $isRedirect[$key] = false;
+                        }
+
+                        if (!($isRedirect[$key] ?? false)) {
+                            $content = $chunk->getContent();
+                            $bufferSizes[$key] = ($bufferSizes[$key] ?? 0) + strlen($content);
+                            if ($bufferSizes[$key] > $this->maxBodyBytes) {
+                                $response->cancel();
+                                throw new \RuntimeException('Response body exceeded the configured size limit.');
+                            }
+                            $buffers[$key] = ($buffers[$key] ?? '') . $content;
+                        }
+
+                        if ($chunk->isLast() && !($isRedirect[$key] ?? false)) {
+                            $headers = $headersMap[$key] ?? [];
+                            $state->result = [
+                                'requested_url' => $state->requestedUrl,
+                                'final_url' => $state->currentUrl,
+                                'status' => $statuses[$key] ?? 200,
+                                'headers' => $headers,
+                                'body' => $buffers[$key] ?? '',
+                                'content_type' => strtolower($headers['content-type'][0] ?? ''),
+                                'duration_ms' => $this->duration($state->started),
+                                'redirects' => $state->redirects,
+                                'error' => null,
+                            ];
+                            $state->done = true;
+                        }
+                    } catch (\Throwable $chunkEx) {
+                        $state->result = $this->errorResult(
+                            $state->requestedUrl,
+                            $state->currentUrl,
+                            $state->started,
+                            $state->redirects,
+                            $chunkEx->getMessage()
+                        );
+                        $state->done = true;
+                        $response->cancel();
+                    }
+                }
+            } catch (\Throwable $streamEx) {
+                foreach ($responses as $key => $response) {
+                    if (!$states[$key]->done && !($isRedirect[$key] ?? false)) {
+                        $states[$key]->result = $this->errorResult(
+                            $states[$key]->requestedUrl,
+                            $states[$key]->currentUrl,
+                            $states[$key]->started,
+                            $states[$key]->redirects,
+                            $streamEx->getMessage()
+                        );
+                        $states[$key]->done = true;
+                    }
                 }
             }
         }
@@ -233,6 +315,11 @@ class SafeHttpFetcher
     private function options(string $url, string $resolvedIp): array
     {
         $host = (string) parse_url($url, PHP_URL_HOST);
+        $port = parse_url($url, PHP_URL_PORT);
+        $resolve = [$host => $resolvedIp];
+        if ($port !== null && $port !== 80 && $port !== 443) {
+            $resolve[$host . ':' . $port] = $resolvedIp;
+        }
 
         return [
             'headers' => [
@@ -244,7 +331,7 @@ class SafeHttpFetcher
             'max_duration' => $this->timeoutSeconds,
             'verify_peer' => true,
             'verify_host' => true,
-            'resolve' => [$host => $resolvedIp],
+            'resolve' => $resolve,
             'on_progress' => function (int $downloaded, int $downloadSize): void {
                 if ($downloaded > $this->maxBodyBytes || $downloadSize > $this->maxBodyBytes) {
                     throw new \RuntimeException('Response body exceeded the configured size limit.');

@@ -58,11 +58,44 @@ readonly class UrlGuard
         return $this->assertPublicHost(strtolower(rtrim($parts['host'], '.')));
     }
 
+    /**
+     * @var list<array{0: string, 1: int}>
+     */
+    private const array IPV4_BLOCKED_RANGES = [
+        ['0.0.0.0', 8],          // Current network (RFC 1122)
+        ['10.0.0.0', 8],         // Private-Use (RFC 1918)
+        ['100.64.0.0', 10],      // Carrier-Grade NAT (RFC 6598)
+        ['127.0.0.0', 8],        // Loopback (RFC 1122)
+        ['169.254.0.0', 16],     // Link-Local / Cloud IMDS (RFC 3927)
+        ['172.16.0.0', 12],      // Private-Use (RFC 1918)
+        ['192.0.0.0', 24],       // IETF Protocol Assignments (RFC 6890)
+        ['192.0.2.0', 24],       // TEST-NET-1 (RFC 5737)
+        ['192.168.0.0', 16],     // Private-Use (RFC 1918)
+        ['198.18.0.0', 15],      // Network benchmark tests (RFC 2544)
+        ['198.51.100.0', 24],    // TEST-NET-2 (RFC 5737)
+        ['203.0.113.0', 24],     // TEST-NET-3 (RFC 5737)
+        ['224.0.0.0', 4],        // Multicast (RFC 5771)
+        ['240.0.0.0', 4],        // Reserved for future use (RFC 1112)
+        ['255.255.255.255', 32], // Limited Broadcast
+    ];
+
+    /**
+     * @var list<array{0: string, 1: int}>
+     */
+    private const array IPV6_BLOCKED_RANGES = [
+        ['::', 128],             // Unspecified
+        ['::1', 128],            // Loopback
+        ['fc00::', 7],           // Unique Local Address (RFC 4193)
+        ['fe80::', 10],          // Link-Local (RFC 4291)
+        ['ff00::', 8],           // Multicast (RFC 4291)
+        ['2001:db8::', 32],      // Documentation (RFC 3849)
+    ];
+
     private function assertPublicHost(string $host): string
     {
         $rawHost = trim($host, '[]');
         if (filter_var($rawHost, FILTER_VALIDATE_IP)) {
-            if (filter_var($rawHost, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false) {
+            if ($this->isIpBlocked($rawHost)) {
                 throw new UnsafeUrlException('Private, reserved, and local network targets are not allowed.');
             }
 
@@ -80,11 +113,92 @@ readonly class UrlGuard
 
         foreach ($records as $record) {
             $ip = $record['ip'] ?? $record['ipv6'] ?? null;
-            if ($ip === null || filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false) {
+            if ($ip === null || $this->isIpBlocked($ip)) {
                 throw new UnsafeUrlException('Private, reserved, and local network targets are not allowed.');
             }
         }
 
         return $records[0]['ip'] ?? $records[0]['ipv6'];
+    }
+
+    public function isIpBlocked(string $ip): bool
+    {
+        if ($ip === '100.100.100.200') {
+            // Alibaba Cloud IMDS
+            return true;
+        }
+
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+            $in6 = @inet_pton($ip);
+            if ($in6 === false) {
+                return true;
+            }
+
+            // Check if IPv4-mapped IPv6 (::ffff:0:0/96)
+            if (str_starts_with($in6, "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xFF\xFF")) {
+                $ipv4 = inet_ntop(substr($in6, 12, 4));
+                if ($ipv4 !== false) {
+                    return $this->isIpBlocked($ipv4);
+                }
+            }
+
+            foreach (self::IPV6_BLOCKED_RANGES as [$subnet, $mask]) {
+                if ($this->matchIpv6Subnet($in6, $subnet, $mask)) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+            $long = ip2long($ip);
+            if ($long === false) {
+                return true;
+            }
+            $ipDec = (float) sprintf('%u', $long);
+
+            foreach (self::IPV4_BLOCKED_RANGES as [$subnet, $mask]) {
+                $subnetLong = ip2long($subnet);
+                if ($subnetLong === false) {
+                    continue;
+                }
+                $subnetDec = (float) sprintf('%u', $subnetLong);
+                $maskBits = $mask === 0 ? 0 : ((~0 << (32 - $mask)) & 0xFFFFFFFF);
+                $maskDec = (float) sprintf('%u', $maskBits);
+
+                if (((int) $ipDec & (int) $maskDec) === ((int) $subnetDec & (int) $maskDec)) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        return true;
+    }
+
+    private function matchIpv6Subnet(string $in6, string $subnetStr, int $mask): bool
+    {
+        $subnetIn6 = inet_pton($subnetStr);
+        if ($subnetIn6 === false) {
+            return false;
+        }
+        $bytes = intdiv($mask, 8);
+        $bits = $mask % 8;
+
+        if ($bytes > 0 && substr($in6, 0, $bytes) !== substr($subnetIn6, 0, $bytes)) {
+            return false;
+        }
+        if ($bits > 0) {
+            $maskByte = (~0 << (8 - $bits)) & 0xFF;
+            $in6Byte = ord($in6[$bytes]);
+            $subByte = ord($subnetIn6[$bytes]);
+            if (($in6Byte & $maskByte) !== ($subByte & $maskByte)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 }

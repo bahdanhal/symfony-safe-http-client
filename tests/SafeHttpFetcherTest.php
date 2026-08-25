@@ -55,4 +55,55 @@ final class SafeHttpFetcherTest extends TestCase
         self::assertSame('<html>OK</html>', $result['body']);
         self::assertNull($result['error']);
     }
+
+    public function testFetchManyProcessesConcurrently(): void
+    {
+        $mockResponse1 = new MockResponse('<html>Page 1</html>', [
+            'http_code' => 200,
+            'response_headers' => ['Content-Type' => 'text/html'],
+        ]);
+        $mockResponse2 = new MockResponse('<html>Page 2</html>', [
+            'http_code' => 200,
+            'response_headers' => ['Content-Type' => 'text/html'],
+        ]);
+        $httpClient = new MockHttpClient([$mockResponse1, $mockResponse2]);
+        $guard = new readonly class extends UrlGuard {
+            public function assertSafe(string $url): string
+            {
+                return '93.184.216.34';
+            }
+        };
+
+        $fetcher = new SafeHttpFetcher($httpClient, $guard);
+        $results = $fetcher->fetchMany(['https://example.com/p1', 'https://example.com/p2']);
+
+        self::assertCount(2, $results);
+        self::assertSame(200, $results['https://example.com/p1']['status']);
+        self::assertSame('<html>Page 1</html>', $results['https://example.com/p1']['body']);
+        self::assertSame(200, $results['https://example.com/p2']['status']);
+        self::assertSame('<html>Page 2</html>', $results['https://example.com/p2']['body']);
+    }
+
+    public function testEnforcesMaxBodyBytesLimit(): void
+    {
+        $largeBody = str_repeat('A', 500);
+        $mockResponse = new MockResponse($largeBody, [
+            'http_code' => 200,
+            'response_headers' => ['Content-Type' => 'text/html'],
+        ]);
+        $httpClient = new MockHttpClient($mockResponse);
+        $guard = new readonly class extends UrlGuard {
+            public function assertSafe(string $url): string
+            {
+                return '93.184.216.34';
+            }
+        };
+
+        // maxBodyBytes = 100
+        $fetcher = new SafeHttpFetcher($httpClient, $guard, 10, 100);
+        $result = $fetcher->fetch('https://example.com');
+
+        self::assertSame(0, $result['status']);
+        self::assertStringContainsString('Response body exceeded the configured size limit', (string) $result['error']);
+    }
 }
