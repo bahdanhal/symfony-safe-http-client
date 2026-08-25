@@ -72,6 +72,7 @@ readonly class UrlGuard
         foreach ($urls as $url) {
             $host = $this->validatedHost($url);
             $rawHost = trim($host, '[]');
+            $this->assertCanonicalIpNotation($rawHost);
             if (filter_var($rawHost, FILTER_VALIDATE_IP)) {
                 if ($this->isIpBlocked($rawHost)) {
                     throw new UnsafeUrlException('Private, reserved, and local network targets are not allowed.');
@@ -157,6 +158,7 @@ readonly class UrlGuard
     private function assertPublicHost(string $host): string
     {
         $rawHost = trim($host, '[]');
+        $this->assertCanonicalIpNotation($rawHost);
         if (filter_var($rawHost, FILTER_VALIDATE_IP)) {
             if ($this->isIpBlocked($rawHost)) {
                 throw new UnsafeUrlException('Private, reserved, and local network targets are not allowed.');
@@ -181,6 +183,16 @@ readonly class UrlGuard
         }
 
         return $records[0];
+    }
+
+    private function assertCanonicalIpNotation(string $host): void
+    {
+        if (
+            filter_var($host, FILTER_VALIDATE_IP) === false
+            && preg_match('/^(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+)){0,3}$/i', $host) === 1
+        ) {
+            throw new UnsafeUrlException('Non-canonical numeric IP addresses are not allowed.');
+        }
     }
 
     public function isIpBlocked(string $ip): bool

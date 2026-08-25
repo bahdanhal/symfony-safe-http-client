@@ -50,6 +50,23 @@ final class UrlGuardTest extends TestCase
         $this->urlGuard->normalize('http://localhost:8080');
     }
 
+    /** @param string $url */
+    #[\PHPUnit\Framework\Attributes\DataProvider('provideAmbiguousNumericHosts')]
+    public function testNormalizeRejectsAmbiguousNumericIpNotation(string $url): void
+    {
+        $this->expectException(UnsafeUrlException::class);
+        $this->expectExceptionMessage('Non-canonical numeric IP addresses are not allowed.');
+        $this->urlGuard->normalize($url);
+    }
+
+    /** @return iterable<string, array{string}> */
+    public static function provideAmbiguousNumericHosts(): iterable
+    {
+        yield 'dotted octal loopback' => ['http://0177.0.0.1'];
+        yield 'dotted hexadecimal loopback' => ['http://0x7f.0x0.0x0.0x1'];
+        yield 'single integer loopback' => ['http://2130706433'];
+    }
+
     public function testNormalizeRejectsCredentials(): void
     {
         $this->expectException(UnsafeUrlException::class);

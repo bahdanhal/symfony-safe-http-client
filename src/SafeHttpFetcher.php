@@ -6,7 +6,7 @@ namespace Bahdan\SafeHttpClient;
 
 use Symfony\Contracts\HttpClient\HttpClientInterface;
 
-class SafeHttpFetcher
+class SafeHttpFetcher implements SafeHttpFetcherInterface
 {
     private const USER_AGENT = 'BahdanToolbox/1.0 (+https://bahdanhal.pl/)';
 

@@ -26,5 +26,8 @@ jobs:
       - name: Install dependencies
         run: composer install --prefer-dist --no-progress
 
+      - name: Validate Composer metadata
+        run: composer validate --strict
+
       - name: Run PHPUnit
         run: vendor/bin/phpunit
