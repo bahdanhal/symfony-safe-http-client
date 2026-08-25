@@ -9,10 +9,23 @@ use Bahdan\SafeHttpClient\Exception\UnsafeUrlException;
 readonly class UrlGuard
 {
     private DnsResolverInterface $dnsResolver;
+    /** @var list<int> */
+    private array $allowedPorts;
 
-    public function __construct(?DnsResolverInterface $dnsResolver = null)
+    /** @param list<int> $allowedPorts */
+    public function __construct(?DnsResolverInterface $dnsResolver = null, array $allowedPorts = [80, 443])
     {
+        if ($allowedPorts === []) {
+            throw new \InvalidArgumentException('At least one allowed port must be configured.');
+        }
+        foreach ($allowedPorts as $port) {
+            if (!is_int($port) || $port < 1 || $port > 65535) {
+                throw new \InvalidArgumentException('Allowed ports must be integers between 1 and 65535.');
+            }
+        }
+
         $this->dnsResolver = $dnsResolver ?? new AsyncDnsResolver();
+        $this->allowedPorts = array_values(array_unique($allowedPorts));
     }
 
     public function normalize(string $input): string
@@ -42,6 +55,7 @@ readonly class UrlGuard
 
         $host = strtolower(rtrim($parts['host'], '.'));
         $this->assertPublicHost($host);
+        $this->assertAllowedPort($parts);
 
         $port = isset($parts['port']) ? ':' . $parts['port'] : '';
         $path = $parts['path'] ?? '/';
@@ -118,6 +132,7 @@ readonly class UrlGuard
         if (isset($parts['user']) || isset($parts['pass'])) {
             throw new UnsafeUrlException('URLs containing credentials are not allowed.');
         }
+        $this->assertAllowedPort($parts);
 
         return strtolower(rtrim($parts['host'], '.'));
     }
@@ -226,22 +241,13 @@ readonly class UrlGuard
         }
 
         if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
-            $long = ip2long($ip);
-            if ($long === false) {
+            $in4 = @inet_pton($ip);
+            if ($in4 === false) {
                 return true;
             }
-            $ipDec = (float) sprintf('%u', $long);
 
             foreach (self::IPV4_BLOCKED_RANGES as [$subnet, $mask]) {
-                $subnetLong = ip2long($subnet);
-                if ($subnetLong === false) {
-                    continue;
-                }
-                $subnetDec = (float) sprintf('%u', $subnetLong);
-                $maskBits = $mask === 0 ? 0 : ((~0 << (32 - $mask)) & 0xFFFFFFFF);
-                $maskDec = (float) sprintf('%u', $maskBits);
-
-                if (((int) $ipDec & (int) $maskDec) === ((int) $subnetDec & (int) $maskDec)) {
+                if ($this->matchBinarySubnet($in4, $subnet, $mask)) {
                     return true;
                 }
             }
@@ -254,25 +260,37 @@ readonly class UrlGuard
 
     private function matchIpv6Subnet(string $in6, string $subnetStr, int $mask): bool
     {
-        $subnetIn6 = inet_pton($subnetStr);
-        if ($subnetIn6 === false) {
+        return $this->matchBinarySubnet($in6, $subnetStr, $mask);
+    }
+
+    private function matchBinarySubnet(string $address, string $subnetString, int $mask): bool
+    {
+        $subnet = @inet_pton($subnetString);
+        if ($subnet === false || strlen($address) !== strlen($subnet)) {
             return false;
         }
         $bytes = intdiv($mask, 8);
         $bits = $mask % 8;
 
-        if ($bytes > 0 && substr($in6, 0, $bytes) !== substr($subnetIn6, 0, $bytes)) {
+        if ($bytes > 0 && substr($address, 0, $bytes) !== substr($subnet, 0, $bytes)) {
             return false;
         }
         if ($bits > 0) {
             $maskByte = (~0 << (8 - $bits)) & 0xFF;
-            $in6Byte = ord($in6[$bytes]);
-            $subByte = ord($subnetIn6[$bytes]);
-            if (($in6Byte & $maskByte) !== ($subByte & $maskByte)) {
+            if ((ord($address[$bytes]) & $maskByte) !== (ord($subnet[$bytes]) & $maskByte)) {
                 return false;
             }
         }
 
         return true;
+    }
+
+    /** @param array<string, mixed> $parts */
+    private function assertAllowedPort(array $parts): void
+    {
+        $port = $parts['port'] ?? (strtolower((string) $parts['scheme']) === 'https' ? 443 : 80);
+        if (!is_int($port) || !in_array($port, $this->allowedPorts, true)) {
+            throw new UnsafeUrlException('The URL uses a port that is not allowed.');
+        }
     }
 }

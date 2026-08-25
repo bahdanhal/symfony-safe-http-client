@@ -10,6 +10,7 @@ An SSRF-safe HTTP client wrapper on top of Symfony `HttpClient` with DNS resolut
 - **DNS Resolution Pinning**: Resolves hostnames before request dispatch and pins the IP to prevent DNS rebinding attacks.
 - **Concurrent DNS**: Resolves unique batch hostnames concurrently through Amp instead of serial native DNS calls.
 - **Safety Limits**: Configurable body size limits, redirect limits, and request timeouts.
+- **Port Allowlist**: Allows only HTTP ports 80 and 443 by default to prevent cross-protocol SSRF.
 - **Batch Requests**: Concurrently fetch and safely resolve multiple URLs.
 - **DI-Friendly Contract**: Type-hint `SafeHttpFetcherInterface` in application services.
 
@@ -34,6 +35,12 @@ echo $result['body'];
 ```
 
 Implement `DnsResolverInterface` and pass it to `UrlGuard` to use a custom resolver while retaining subnet validation and connection pinning.
+
+Applications that intentionally fetch from another HTTP port can opt in explicitly:
+
+```php
+$guard = new UrlGuard(allowedPorts: [80, 443, 8080, 8443]);
+```
 
 ## How DNS rebinding protection works
 

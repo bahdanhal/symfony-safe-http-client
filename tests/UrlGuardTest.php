@@ -81,6 +81,39 @@ final class UrlGuardTest extends TestCase
         $this->urlGuard->assertSafe('https://user:secret@example.com/private');
     }
 
+    public function testNormalizeRejectsNonWebPortByDefault(): void
+    {
+        $this->expectException(UnsafeUrlException::class);
+        $this->expectExceptionMessage('The URL uses a port that is not allowed.');
+        $this->urlGuard->normalize('https://example.com:6379');
+    }
+
+    public function testRedirectValidationRejectsNonWebPortByDefault(): void
+    {
+        $this->expectException(UnsafeUrlException::class);
+        $this->expectExceptionMessage('The URL uses a port that is not allowed.');
+        $this->urlGuard->assertSafe('https://example.com:5432/private');
+    }
+
+    public function testExplicitlyConfiguredWebPortIsAllowed(): void
+    {
+        $guard = new UrlGuard(new class implements DnsResolverInterface {
+            public function resolveMany(array $hosts): array
+            {
+                return array_fill_keys($hosts, ['93.184.216.34']);
+            }
+        }, [80, 443, 8080]);
+
+        self::assertSame('http://example.com:8080/', $guard->normalize('http://example.com:8080'));
+    }
+
+    public function testRejectsInvalidAllowedPortConfiguration(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Allowed ports must be integers between 1 and 65535.');
+        new UrlGuard(allowedPorts: [0, 443]);
+    }
+
     /**
      * @param string $ip
      */
@@ -114,5 +147,20 @@ final class UrlGuardTest extends TestCase
         yield 'aws imdsv6' => ['fd00:ec2::254'];
         yield 'ipv4 mapped loopback' => ['::ffff:127.0.0.1'];
         yield 'ipv4 mapped imds' => ['::ffff:169.254.169.254'];
+    }
+
+    /** @param string $ip */
+    #[\PHPUnit\Framework\Attributes\DataProvider('providePublicIps')]
+    public function testAllowsPublicIpsAcrossSignedIntegerBoundary(string $ip): void
+    {
+        self::assertFalse($this->urlGuard->isIpBlocked($ip), "Expected IP $ip to be allowed.");
+    }
+
+    /** @return iterable<string, array{string}> */
+    public static function providePublicIps(): iterable
+    {
+        yield 'lower half' => ['8.8.8.8'];
+        yield 'upper half' => ['128.1.2.3'];
+        yield 'upper half near reserved block' => ['223.255.255.254'];
     }
 }
